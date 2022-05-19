@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<launch>
+    <node name="amiga_plane_fitter" type="check_planarity" pkg="amiga_obstacle_avoid" output="screen"/>
+</launch>
