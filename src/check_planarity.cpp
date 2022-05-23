@@ -4,6 +4,7 @@
 #include <ros/publisher.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <dynamic_reconfigure/server.h>
+#include <rosparam_shortcuts/rosparam_shortcuts.h>
 
 // PCL
 #include <pcl_ros/point_cloud.h>
@@ -16,6 +17,8 @@
 #include <pcl/filters/passthrough.h>
 
 #include "plane_fitter/algorithmParametersConfig.h"
+
+constexpr char LOGNAME[] = "amiga_plane_fitter";
 
 double point2planedistnace(pcl::PointXYZ pt, pcl::ModelCoefficients::Ptr coefficients){
     double f1 = fabs(coefficients->values[0]*pt.x+coefficients->values[1]*pt.y+coefficients->values[2]*pt.z+coefficients->values[3]);
@@ -109,16 +112,29 @@ public:
         _pub_inliers = _nh.advertise< sensor_msgs::PointCloud2 >("inliers",2);
 
         // Subscriber
-        _subs = _nh.subscribe("/l515_grip/depth/color/points",1,&planeFitter::pointCloudCb,this);
+        if(_camera == "zed2") _subs = _nh.subscribe("/zed2_node/point_cloud/cloud_registered",1,&planeFitter::pointCloudCb,this);
+        // l515
+        else _subs = _nh.subscribe("/l515_grip/depth/color/points",1,&planeFitter::pointCloudCb,this);
 
         // Get parameters
-        ros::param::param<double>("~max_distance",_max_distance,0.005);
-        ros::param::param<double>("~min_percentage",_min_percentage,5);
-        ros::param::param<bool>("~color_pc_with_error",_color_pc_with_error,false);
+        std::size_t error = 0;
+        _nh.getParam("max_distance", _max_distance);
+        _nh.getParam("min_percentage", _min_percentage);
+        _nh.getParam("color_pc_with_error", _color_pc_with_error);
+        _nh.getParam("enable_err_calculation", _enable_err_calculation);
+        _nh.getParam("camera", _camera);
+        _nh.getParam("min_depth", _min_depth);
+        _nh.getParam("max_depth", _max_depth);
+        //error += !rosparam_shortcuts::get(LOGNAME, _nh, "~min_percentage", _min_percentage);
+        //error += !rosparam_shortcuts::get(LOGNAME, _nh, "~color_pc_with_error", _color_pc_with_error);
+        // ros::param::param<double>("~max_distance",_max_distance,0.005);
+        // ros::param::param<double>("~min_percentage",_min_percentage,5);
+        // ros::param::param<bool>("~color_pc_with_error",_color_pc_with_error,false);
+        //rosparam_shortcuts::shutdownIfError(LOGNAME, error);
 
         // Create dynamic reconfigure
-        drCallback = boost::bind( &planeFitter::updateParameters, this, _1, _2);
-        dRserver.setCallback(drCallback);
+        // drCallback = boost::bind( &planeFitter::updateParameters, this, _1, _2);
+        // dRserver.setCallback(drCallback);
 
         // Create colors pallete
         createColors();
@@ -127,11 +143,11 @@ public:
         ROS_INFO("%s: node initialized.",_name.c_str());
     }
 
-    void updateParameters(plane_fitter::algorithmParametersConfig& config, uint32_t level){
-        _max_distance = config.max_distance/1000;
-        _min_percentage = config.min_percentage_of_points;
-        _color_pc_with_error = config.paint_with_error;
-    }
+    // void updateParameters(plane_fitter::algorithmParametersConfig& config, uint32_t level){
+    //     _max_distance = config.max_distance/100;
+    //     _min_percentage = config.min_percentage_of_points;
+    //     _color_pc_with_error = config.paint_with_error;
+    // }
 
     void pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr &msg){
 
@@ -143,8 +159,16 @@ public:
         // Filter cloud
         pcl::PassThrough<pcl::PointXYZ> pass;
         pass.setInputCloud(cloud_msg);
-        pass.setFilterFieldName ("z");
-        pass.setFilterLimits(0.001,10000);
+        // For zed2 cameras specific TODO: yilong
+        if (_camera == "zed2"){
+            pass.setFilterFieldName ("x");
+            pass.setFilterLimits(_min_depth, _max_depth);
+        }
+        else{
+            pass.setFilterFieldName ("z");
+            pass.setFilterLimits(_min_depth, _max_depth);
+        }
+
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ>);
         pass.filter (*cloud);
 
@@ -162,8 +186,8 @@ public:
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_pub(new pcl::PointCloud<pcl::PointXYZRGB>);
         int original_size(cloud->height*cloud->width);
         int n_planes(0);
-        //while (cloud->height*cloud->width>original_size*_min_percentage/100){
-        while (cloud->height*cloud->width>original_size*50/100){
+        while (cloud->height*cloud->width>original_size*_min_percentage/100){
+        //while (cloud->height*cloud->width>original_size*40/100){
             // Fit a plane
             seg.setInputCloud(cloud);
             seg.segment(*inliers, *coefficients);
@@ -177,29 +201,32 @@ public:
             double max_error(0);
             double min_error(100000);
             std::vector<double> err;
-            for (int i=0;i<inliers->indices.size();i++){
+            if (_enable_err_calculation){
+                for (int i=0;i<inliers->indices.size();i++){
 
-                // Get Point
-                pcl::PointXYZ pt = cloud->points[inliers->indices[i]];
+                    // Get Point
+                    pcl::PointXYZ pt = cloud->points[inliers->indices[i]];
 
-                // Compute distance
-                double d = point2planedistnace(pt,coefficients)*1000;// mm
-                err.push_back(d);
+                    // Compute distance
+                    double d = point2planedistnace(pt,coefficients)*1000;// mm
+                    err.push_back(d);
 
-                // Update statistics
-                mean_error += d;
-                if (d>max_error) max_error = d;
-                if (d<min_error) min_error = d;
+                    // Update statistics
+                    mean_error += d;
+                    if (d>max_error) max_error = d;
+                    if (d<min_error) min_error = d;
 
+                }
+                mean_error/=inliers->indices.size();
+                // Compute Standard deviation
             }
-            mean_error/=inliers->indices.size();
-
-            // Compute Standard deviation
-            ColorMap cm(min_error,max_error);
             double sigma(0);
-            for (int i=0;i<inliers->indices.size();i++){
+            ColorMap cm(min_error,max_error);
 
-                sigma += pow(err[i] - mean_error,2);
+            for (int i=0;i<inliers->indices.size();i++){
+                if (_enable_err_calculation){
+                    sigma += pow(err[i] - mean_error,2);
+                }
 
                 // Get Point
                 pcl::PointXYZ pt = cloud->points[inliers->indices[i]];
@@ -229,6 +256,11 @@ public:
             cloud->swap(cloudF);
 
             // Display infor
+            if(!_enable_err_calculation){
+                mean_error = -1;
+                sigma = -1;
+                max_error = -1;
+            }
             ROS_INFO("%s: fitted plane %i: %fx%s%fy%s%fz%s%f=0 (inliers: %zu/%i)",
                      _name.c_str(),n_planes,
                      coefficients->values[0],(coefficients->values[1]>=0?"+":""),
@@ -236,8 +268,10 @@ public:
                      coefficients->values[2],(coefficients->values[3]>=0?"+":""),
                      coefficients->values[3],
                      inliers->indices.size(),original_size);
-            ROS_INFO("%s: mean error: %f(mm), standard deviation: %f (mm), max error: %f(mm)",_name.c_str(),mean_error,sigma,max_error);
+            if(_enable_err_calculation)
+                ROS_INFO("%s: mean error: %f(mm), standard deviation: %f (mm), max error: %f(mm)",_name.c_str(),mean_error,sigma,max_error);
             ROS_INFO("%s: poitns left in cloud %i",_name.c_str(),cloud->width*cloud->height);
+
 
             // Nest iteration
             n_planes++;
@@ -288,6 +322,10 @@ private:
     double _min_percentage;
     double _max_distance;
     bool _color_pc_with_error;
+    bool _enable_err_calculation;
+    double _min_depth;
+    double _max_depth;
+    std::string _camera;
 
     // Colors
     std::vector<Color> colors;
